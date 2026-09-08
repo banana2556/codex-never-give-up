@@ -1,4 +1,4 @@
-# Codex 自動重試 / codex-auto-retry
+# codex-never-give-up
 
 > **EN:** Unofficial auto-retry for the **OpenAI Codex desktop app** on Windows.
 > When a turn dies with `serverOverloaded` ("Selected model is at capacity"), the app
@@ -69,7 +69,7 @@ python codex-inject.py --force --watch
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --noconsole --name "Codex自動重試" --icon icon.ico ^
+pyinstaller --onefile --noconsole --name "codex-never-give-up" --icon icon.ico ^
             --add-data "codex-retry-hook.js;." codex_retry_gui.pyw
 ```
 
