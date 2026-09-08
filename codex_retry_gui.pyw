@@ -36,6 +36,55 @@ def ps(cmd):
                           creationflags=NO_WINDOW).stdout.strip()
 
 
+def activate_msix(aumid, args):
+    """Store/MSIX 不能 CreateProcess（WinError 5），要用 IApplicationActivationManager。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = (('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', wintypes.BYTE * 8))
+
+        def __init__(self, s):
+            super().__init__()
+            ctypes.oledll.ole32.CLSIDFromString(s, ctypes.byref(self))
+
+    ole32 = ctypes.oledll.ole32
+    try:
+        ole32.CoInitializeEx(None, 0x2)
+    except OSError:
+        pass
+    clsid = GUID('{45BA127D-10A8-46EA-8AB7-56EA9078943C}')
+    iid = GUID('{2e941141-7f97-4756-ba1d-9decde894a3d}')
+    mgr = ctypes.c_void_p()
+    ole32.CoCreateInstance(ctypes.byref(clsid), None, 4, ctypes.byref(iid),
+                           ctypes.byref(mgr))
+    vtbl = ctypes.cast(mgr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+    ActivateApplication = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT, ctypes.c_void_p, wintypes.LPCWSTR, wintypes.LPCWSTR,
+        ctypes.c_int, ctypes.POINTER(wintypes.DWORD)
+    )(vtbl[3])
+    pid = wintypes.DWORD()
+    hr = ActivateApplication(mgr, aumid, args or '', 0, ctypes.byref(pid))
+    if hr < 0:
+        raise OSError(None, 'ActivateApplication failed', None, hr & 0xFFFFFFFF)
+    if not pid.value:
+        raise RuntimeError('ActivateApplication 沒有回傳 pid')
+    return pid.value
+
+
+def launch_codex(port):
+    fam = ps("(Get-AppxPackage -Name 'OpenAI.Codex').PackageFamilyName")
+    if not fam:
+        raise RuntimeError('找不到 OpenAI.Codex PackageFamilyName')
+    args = (f'--remote-debugging-port={port} '
+            '--remote-debugging-address=127.0.0.1 '
+            '--remote-allow-origins=*')
+    return activate_msix(f'{fam}!App', args)
+
+
 def find_codex():
     """回傳 ChatGPT.exe 的完整路徑，找不到回 None。"""
     loc = ps("(Get-AppxPackage -Name 'OpenAI.Codex').InstallLocation")
@@ -158,10 +207,14 @@ class Worker(threading.Thread):
                 if c == 'quit':
                     return
                 if c == 'inject':
-                    if self.exe:
-                        await self.do_inject(s)
-                    else:
-                        self.say('log', line='沒有 Codex 路徑，注入已略過')
+                    try:
+                        if self.exe:
+                            await self.do_inject(s)
+                        else:
+                            self.say('log', line='沒有 Codex 路徑，注入已略過')
+                    except Exception as e:
+                        self.say('state', state='error', msg=f'啟動/注入失敗: {e}')
+                        self.say('log', line=f'{type(e).__name__}: {e}')
                 await self.do_poll(s)
                 if not self.exe:                # 之後才安裝的話也能接上
                     self.exe = await asyncio.get_running_loop().run_in_executor(
@@ -229,13 +282,21 @@ class Worker(threading.Thread):
                         break
                     await asyncio.sleep(0.5)
             self.say('state', state='busy', msg='啟動 Codex…')
-            subprocess.Popen([self.exe, f'--remote-debugging-port={PORT}'],
-                             creationflags=subprocess.DETACHED_PROCESS | NO_WINDOW)
+            try:
+                pid = launch_codex(PORT)
+                self.say('log', line=f'已啟動 Codex pid {pid}')
+            except Exception as e:
+                return self.say('state', state='error', msg=f'啟動失敗: {e}')
             deadline = time.time() + 90
             while time.time() < deadline and not page_targets():
+                left = int(deadline - time.time())
+                if left % 5 == 0:
+                    self.say('state', state='busy',
+                             msg=f'啟動 Codex… 等待 debug port（剩 {left}s）')
                 await asyncio.sleep(1)
             if not page_targets():
-                return self.say('state', state='error', msg=f'等不到 debug port {PORT}')
+                return self.say('state', state='error',
+                                msg=f'等不到 debug port {PORT}')
 
         self.say('state', state='busy', msg='注入中…')
         ok = 0

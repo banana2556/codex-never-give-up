@@ -47,14 +47,19 @@ renderer bundle 裡就是這張表：`LDr = [10, 30, 120, 300]`。而真正讓�
 
 ### 圖形介面（推薦）
 
+Windows 若沒把 `.pyw` 關聯到 Python，雙擊腳本不會啟動。請雙擊 `run.bat`，或：
+
 ```
 pythonw codex_retry_gui.pyw
 ```
 
-按「一鍵注入」。它會關掉 Codex、帶 `--remote-debugging-port` 重開、注入所有視窗，
+按「一鍵注入」。它會關掉 Codex、以 Store 套件啟動方式帶 `--remote-debugging-port` 重開、注入所有視窗，
 之後新開的視窗自動補上。全程沒有主控台黑框。
 
 找不到 Codex 安裝路徑時按鈕是灰的，不會亂跑。
+
+> 不能直接 `CreateProcess` `WindowsApps\...\ChatGPT.exe`（會 WinError 5 存取被拒，畫面卡在「啟動 Codex」）。
+> 必須走 `IApplicationActivationManager`，參數才會進 Chromium。
 
 ### 命令列
 
@@ -227,6 +232,7 @@ python tools/hotswap.py        # 改完 hook 熱換進正在跑的 Codex，不�
 codex-retry-hook.js      注入 renderer 的核心（偵測 + 判斷 + 執行）
 codex_retry_gui.pyw      GUI 注入器
 codex-inject.py          命令列注入器
+run.bat                  Windows 雙擊啟動（不依賴 .pyw 檔案關聯）
 test-hook.cjs            決策核心的測試
 test-build.cjs           RPC 組裝與模板落地的測試
 tools/                   執行期診斷

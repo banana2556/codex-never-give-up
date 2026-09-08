@@ -30,6 +30,53 @@ def ps(cmd):
     return subprocess.run(['powershell', '-NoProfile', '-Command', cmd],
                           capture_output=True, text=True).stdout.strip()
 
+def activate_msix(aumid, args):
+    """Store/MSIX 不能 CreateProcess（WinError 5），要用 IApplicationActivationManager。"""
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = (('Data1', wintypes.DWORD),
+                    ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD),
+                    ('Data4', wintypes.BYTE * 8))
+
+        def __init__(self, s):
+            super().__init__()
+            ctypes.oledll.ole32.CLSIDFromString(s, ctypes.byref(self))
+
+    ole32 = ctypes.oledll.ole32
+    try:
+        ole32.CoInitializeEx(None, 0x2)
+    except OSError:
+        pass
+    clsid = GUID('{45BA127D-10A8-46EA-8AB7-56EA9078943C}')
+    iid = GUID('{2e941141-7f97-4756-ba1d-9decde894a3d}')
+    mgr = ctypes.c_void_p()
+    ole32.CoCreateInstance(ctypes.byref(clsid), None, 4, ctypes.byref(iid),
+                           ctypes.byref(mgr))
+    vtbl = ctypes.cast(mgr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+    ActivateApplication = ctypes.WINFUNCTYPE(
+        ctypes.HRESULT, ctypes.c_void_p, wintypes.LPCWSTR, wintypes.LPCWSTR,
+        ctypes.c_int, ctypes.POINTER(wintypes.DWORD)
+    )(vtbl[3])
+    pid = wintypes.DWORD()
+    hr = ActivateApplication(mgr, aumid, args or '', 0, ctypes.byref(pid))
+    if hr < 0:
+        raise OSError(None, 'ActivateApplication failed', None, hr & 0xFFFFFFFF)
+    if not pid.value:
+        raise RuntimeError('ActivateApplication 沒有回傳 pid')
+    return pid.value
+
+def launch_codex(port):
+    fam = ps("(Get-AppxPackage -Name 'OpenAI.Codex').PackageFamilyName")
+    if not fam:
+        sys.exit('找不到 OpenAI.Codex PackageFamilyName')
+    args = (f'--remote-debugging-port={port} '
+            '--remote-debugging-address=127.0.0.1 '
+            '--remote-allow-origins=*')
+    return activate_msix(f'{fam}!App', args)
+
 def app_exe():
     loc = ps("(Get-AppxPackage -Name 'OpenAI.Codex').InstallLocation")
     if not loc:
@@ -75,37 +122,43 @@ async def run():
     src = HOOK.read_text(encoding='utf-8')
     exe = app_exe()
 
-    pids = live_pids()
-    if pids:
-        if not FORCE:
-            sys.exit(f'Codex 正在跑（pid {",".join(pids)}）。Chromium 只在啟動時吃 '
-                     f'--remote-debugging-port，要先關掉。\n'
-                     f'確定可以關就加 --force 重跑。')
-        print(f'關掉現有的 Codex（pid {",".join(pids)}）...')
-        ps("Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | "
-           "Where-Object { $_.Path -like '*OpenAI.Codex*' } | Stop-Process -Force")
-        for _ in range(30):
-            if not live_pids():
-                break
-            time.sleep(0.5)
+    try:
+        targets = [t for t in http_json('/json/list')
+                   if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')]
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        targets = []
 
-    print(f'啟動 {exe.name} --remote-debugging-port={PORT}')
-    subprocess.Popen([str(exe), f'--remote-debugging-port={PORT}'],
-                     creationflags=subprocess.DETACHED_PROCESS)
-
-    deadline = time.time() + 90
-    targets = []
-    while time.time() < deadline:
-        try:
-            targets = [t for t in http_json('/json/list')
-                       if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')]
-            if targets:
-                break
-        except (urllib.error.URLError, OSError, json.JSONDecodeError):
-            pass
-        time.sleep(1)
     if not targets:
-        sys.exit(f'等不到 debug port {PORT} 上的頁面 — 這個版本可能不吃這個參數。')
+        pids = live_pids()
+        if pids:
+            if not FORCE:
+                sys.exit(f'Codex 正在跑（pid {",".join(pids)}）。Chromium 只在啟動時吃 '
+                         f'--remote-debugging-port，要先關掉。\n'
+                         f'確定可以關就加 --force 重跑。')
+            print(f'關掉現有的 Codex（pid {",".join(pids)}）...')
+            ps("Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | "
+               "Where-Object { $_.Path -like '*OpenAI.Codex*' } | Stop-Process -Force")
+            for _ in range(30):
+                if not live_pids():
+                    break
+                time.sleep(0.5)
+
+        print(f'啟動 {exe.name} --remote-debugging-port={PORT}（AppX）')
+        pid = launch_codex(PORT)
+        print(f'已啟動 pid {pid}')
+
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            try:
+                targets = [t for t in http_json('/json/list')
+                           if t.get('type') == 'page' and t.get('webSocketDebuggerUrl')]
+                if targets:
+                    break
+            except (urllib.error.URLError, OSError, json.JSONDecodeError):
+                pass
+            time.sleep(1)
+        if not targets:
+            sys.exit(f'等不到 debug port {PORT} 上的頁面 — 這個版本可能不吃這個參數。')
 
     print(f'找到 {len(targets)} 個頁面')
     async with aiohttp.ClientSession() as session:
